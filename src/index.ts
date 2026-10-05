@@ -8,6 +8,13 @@ import {
 } from "./stream.js";
 import { EventBatcher } from "./batch.js";
 const CONNECTION_EVENT = "pi-mcp-adapter:connection:v1";
+const ADAPTER_SETUP_HELP = [
+  "Pi MCP Events requires an enabled pi-mcp-adapter with the connection-lease hook; no compatible adapter responded.",
+  "If the upstream npm adapter is installed, remove it: pi remove npm:pi-mcp-adapter",
+  "For a Git or local installation, remove that adapter registration instead. Skip removal if no adapter is installed.",
+  "Install the compatible adapter: pi install npm:@realmikekelly/pi-mcp-adapter",
+  "Restart Pi and keep only one adapter enabled. Your MCP server configuration can stay as it is.",
+].join("\n");
 const response = (details: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(details) }],
   details,
@@ -40,6 +47,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
     64000,
   );
   let notify: (text: string) => void = () => {};
+  let setupWarningShown = false;
   const connect = (server: string) => {
     let promise = connections.get(server);
     if (promise) return promise;
@@ -50,10 +58,13 @@ export default function mcpEvents(pi: ExtensionAPI) {
         name: server,
       };
       pi.events.emit(CONNECTION_EVENT, req);
-      if (!req.result)
-        throw new Error(
-          "The installed pi-mcp-adapter needs the connection-lease hook. See pi-mcp-events README.",
-        );
+      if (!req.result) {
+        if (!setupWarningShown) {
+          notify(ADAPTER_SETUP_HELP);
+          setupWarningShown = true;
+        }
+        throw new Error(ADAPTER_SETUP_HELP);
+      }
       const lease = await req.result;
       if (lease.transportKind !== "stdio") {
         lease.release();
@@ -199,6 +210,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
     },
   });
   pi.on("session_start", (_e, ctx) => {
+    setupWarningShown = false;
     notify = (text) => ctx.ui.notify(text, "warning");
   });
   pi.on("session_shutdown", async () => {

@@ -15,9 +15,13 @@ pi install npm:@realmikekelly/pi-mcp-adapter
 pi install npm:@realmikekelly/pi-mcp-events
 ```
 
+Use the full `npm:@realmikekelly/pi-mcp-events` source: `npm:` tells Pi to install from npm, and `@realmikekelly/` is part of the published package name. A bare `pi install pi-mcp-events` is treated as a local path.
+
 Restart Pi. Keep only one adapter enabled; if you installed the upstream adapter from Git or a local path, remove that registration instead. **Your existing MCP server configuration stays the same.** Once upstream includes the hook, you can switch back to the official adapter and keep this companion.
 
 Both packages must be installed as Pi extensions. The companion deliberately does not install another adapter as an npm dependency. It reuses the active adapter's connection, so a server can offer tools and events in the same process. The adapter's management UI and tool rendering remain available; this version does not add a dedicated subscriptions panel.
+
+If the adapter is missing, disabled, or lacks the required hook, the first `mcp_events` catalog or subscribe request returns an error with the replacement install command and restart instructions. Pi also shows those instructions as a warning once per session. Compatibility is checked when you use the tool, not at startup. Pi stays running, and the extension does not install packages or launch a separate MCP server to work around the missing hook.
 
 ## Try it with Figma listen
 

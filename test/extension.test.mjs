@@ -116,19 +116,42 @@ test("unsupported transport and failed subscription release the lease", async ()
   assert.equal(local.releases(), 1);
 });
 
-test("unpatched adapter fails clearly without starting another server", async () => {
+test("missing adapter hook returns install instructions and warns once per session", async () => {
   let tool;
+  const hooks = new Map(), warnings = [];
   extension({
     events: { emit() {} },
     registerTool(t) {
       tool = t;
     },
-    on() {},
+    on(name, callback) {
+      hooks.set(name, callback);
+    },
     sendMessage() {
       assert.fail("unexpected wakeup");
     },
   });
-  const result = await tool.execute("test", subscribe);
-  assert.equal(result.isError, true);
-  assert.match(result.details.error, /connection-lease hook/);
+  const start = () => hooks.get("session_start")({}, {
+    ui: { notify: (...args) => warnings.push(args) },
+  });
+  start();
+  assert.equal(warnings.length, 0);
+  for (const action of ["catalog", "subscribe", "subscribe"]) {
+    const result = await tool.execute("test", { ...subscribe, action });
+    assert.equal(result.isError, true);
+    assert.match(result.details.error, /connection-lease hook/);
+    assert.match(result.details.error, /pi remove npm:pi-mcp-adapter/);
+    assert.match(result.details.error, /pi install npm:@realmikekelly\/pi-mcp-adapter/);
+    assert.match(result.details.error, /Git or local/);
+    assert.match(result.details.error, /Restart Pi/);
+    assert.equal(JSON.parse(result.content[0].text).error, result.details.error);
+    assert.equal(warnings[0][0], result.details.error);
+  }
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][1], "warning");
+  assert.deepEqual((await tool.execute("test", { action: "list" })).details, { subscriptions: [] });
+  await hooks.get("session_shutdown")();
+  start();
+  await tool.execute("test", subscribe);
+  assert.equal(warnings.length, 2);
 });
