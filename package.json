@@ -27,11 +27,11 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "zod": "^4.6.5",
-    "typebox": "^1.3.27"
+    "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.0.3"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
@@ -46,7 +46,8 @@
     "typescript": "^7.0.2",
     "@realmikekelly/pi-mcp-adapter": "https://github.com/mikekelly/pi-mcp-adapter/archive/449bf3771228e920b136326eecf6fd9da943a1bb.tar.gz",
     "@modelcontextprotocol/client": "^2.3.0",
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "typebox": "^1.3.27"
   },
   "keywords": [
     "pi-package",

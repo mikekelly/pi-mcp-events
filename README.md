@@ -6,11 +6,9 @@ The adapter owns server configuration, authentication, connections, tool discove
 
 ## Install
 
-**This branch prepares Pi MCP Events 0.2.0 and requires adapter fork 5.1.0 or newer. The previously published 0.1.0 / 5.0.1 pair uses the older API and must be upgraded together when these releases are published.**
+**Pi MCP Events 0.2.0 requires adapter fork 5.1.0 or newer. Upgrade both packages together from the older 0.1.0 / 5.0.1 pair.**
 
 Requires Node 22.19+ and Pi 1.0.3+. For now, use [Mike Kelly's adapter fork](https://github.com/mikekelly/pi-mcp-adapter), which includes the mediated protocol-extension hook needed by this package. Unmodified upstream pi-mcp-adapter 5.0.0 does not expose that hook.
-
-Once those versions are published:
 
 ```sh
 # Skip removal if the upstream adapter is not installed.
@@ -98,7 +96,7 @@ cd pi-mcp-events
 npm ci
 ```
 
-The development dependency pins the compatible adapter fork by Git commit, so `npm ci` tests the new API even before its npm release. To try this unreleased pair locally after cloning and building:
+The development dependency pins the compatible adapter fork by Git commit, so `npm ci` tests the exact adapter revision. To try local builds after cloning and building:
 
 ```sh
 npm run build
