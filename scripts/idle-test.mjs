@@ -101,7 +101,7 @@ try {
   await session.prompt(
     live
       ? `Use mcp_events to subscribe to figma.design.changed on server figma with arguments ${JSON.stringify({ scope: { kind: "frame", file_key: process.env.FIGMA_LIVE_FILE, node_id: process.env.FIGMA_LIVE_FRAME } })}. Once active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply briefly identifying the changed node name and property.`
-      : 'Use mcp_events to subscribe to figma.comment.created on server figma with arguments {"scope":{"kind":"file","file_key":"fileA"},"tag":"#bot"}. Once the subscription is active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply with its comment text only. If the subscription later fails or ends, reply STREAM_STOPPED and do not resubscribe.',
+      : 'Use mcp_events to subscribe to figma.comment.created on server figma with arguments {"scope":{"kind":"file","file_key":"fileA"},"tag":"#bot"}. Once the subscription is active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply with its comment text only. If the subscription is reconnecting, reply STREAM_RECOVERING and do not resubscribe. If it later fails or ends, reply STREAM_STOPPED and do not resubscribe.',
   );
   assert.match(session.getLastAssistantText(), /SUBSCRIBED/);
   assert.equal(session.isStreaming, false);
@@ -176,11 +176,12 @@ try {
     }
     assert.equal(
       starts,
-      beforeDisconnect + 1,
-      "Disconnect must trigger exactly one follow-up turn",
+      beforeDisconnect + 2,
+      "Disconnect and exhausted recovery must each trigger one follow-up turn",
     );
     assert.match(session.getLastAssistantText(), /STREAM_STOPPED/);
     result.disconnect_wakeup = true;
+    result.retry_exhaustion_wakeup = true;
     result.disconnect_response = session.getLastAssistantText();
     result.finalStarts = starts;
   }

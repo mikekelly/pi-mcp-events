@@ -18,7 +18,15 @@ export interface Subscription {
   name: string;
   arguments: Record<string, unknown>;
   cursor: string | null;
-  status: "opening" | "active" | "stopped" | "ended" | "failed";
+  status:
+    | "opening"
+    | "active"
+    | "reconnecting"
+    | "stopped"
+    | "ended"
+    | "failed";
+  maxAgeMs?: number;
+  truncated?: boolean;
   error?: string;
   endReason?: ProtocolEnd["reason"];
 }
@@ -38,21 +46,33 @@ const catalogSchema = z.object({
   nextCursor: z.string().optional(),
 });
 
-/** Events protocol semantics over the adapter's mediated protocol API. */
+interface Item {
+  sub: Subscription;
+  stream?: ProtocolStream;
+  ready: () => void;
+  fail: (e: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+  seen: Set<string>;
+  activated: boolean;
+  attempts: number;
+  outage: boolean;
+}
+export interface PushOptions {
+  reconnect?: () => Promise<ProtocolSession>;
+  onClose?: () => void;
+  heartbeatTimeoutMs?: number;
+  retryBaseMs?: number;
+  maxRetries?: number;
+}
+const errorText = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
+
+/** One logical subscription survives replacement of its underlying push stream. */
 export class EventConnection {
-  private streams = new Map<
-    string,
-    {
-      sub: Subscription;
-      stream: ProtocolStream;
-      ready: () => void;
-      fail: (e: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-      seen: Set<string>;
-    }
-  >();
+  private streams = new Map<string, Item>();
   private closed = false;
   private opening = 0;
+  private reconnecting?: Promise<ProtocolSession>;
   get idle() {
     return this.opening === 0 && this.streams.size === 0;
   }
@@ -66,23 +86,57 @@ export class EventConnection {
     ) => void = () => {},
     private onGap: (sub: Subscription) => void = () => {},
     private timeoutMs = 15000,
+    private options: PushOptions = {},
   ) {
     session.signal.addEventListener("abort", this.disconnected, { once: true });
     if (session.signal.aborted) this.disconnected();
   }
-  private disconnected = () =>
-    this.close("MCP connection ended; subscribe again to resume.");
+  private disconnected = () => {
+    for (const item of [...this.streams.values()]) {
+      if (item.sub.status !== "reconnecting")
+        this.interrupted(item, {
+          reason: "disconnected",
+          error: "MCP connection ended",
+        });
+    }
+  };
+  private async availableSession() {
+    if (this.closed) throw new Error("MCP connection closed");
+    if (!this.session.signal.aborted) return this.session;
+    if (!this.options.reconnect) throw new Error("MCP connection closed");
+    if (!this.reconnecting) {
+      this.reconnecting = this.options
+        .reconnect()
+        .then((session) => {
+          if (this.closed) {
+            session.close();
+            throw new Error("MCP connection closed");
+          }
+          if (session.signal.aborted) {
+            session.close();
+            throw new Error("MCP connection is unavailable");
+          }
+          this.session.signal.removeEventListener("abort", this.disconnected);
+          this.session = session;
+          session.signal.addEventListener("abort", this.disconnected, {
+            once: true,
+          });
+          return session;
+        })
+        .finally(() => {
+          this.reconnecting = undefined;
+        });
+    }
+    return this.reconnecting;
+  }
   async catalog(signal?: AbortSignal) {
+    const session = await this.availableSession();
     const events: z.infer<typeof catalogSchema>["events"] = [];
     let cursor: string | undefined;
     const seen = new Set<string>();
     do {
       const page = catalogSchema.parse(
-        await this.session.request(
-          "events/list",
-          cursor ? { cursor } : {},
-          signal,
-        ),
+        await session.request("events/list", cursor ? { cursor } : {}, signal),
       );
       events.push(...page.events);
       cursor = page.nextCursor;
@@ -99,9 +153,15 @@ export class EventConnection {
     args: Record<string, unknown>,
     cursor: string | null = null,
     signal?: AbortSignal,
+    maxAgeMs?: number,
   ): Promise<Subscription> {
     if (signal?.aborted) throw new Error("Cancelled");
     if (this.closed) throw new Error("MCP connection closed");
+    if (
+      maxAgeMs !== undefined &&
+      (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0)
+    )
+      throw new Error("max_age_ms must be a nonnegative integer");
     this.opening++;
     let entry;
     try {
@@ -111,76 +171,116 @@ export class EventConnection {
     }
     if (!entry) throw new Error(`Unknown MCP event: ${name}`);
     if (!entry.delivery.includes("push"))
-      throw new Error("This event does not advertise draft push delivery");
+      throw new Error(
+        "This event does not advertise draft push delivery; polling and webhooks are not supported",
+      );
     if (signal?.aborted) throw new Error("Cancelled");
     if (this.closed) throw new Error("MCP connection closed");
     const sub: Subscription = {
       id: "",
       server: this.server,
       name,
-      arguments: args,
+      arguments: structuredClone(args),
       cursor,
       status: "opening",
+      ...(maxAgeMs === undefined ? {} : { maxAgeMs }),
     };
-    const stream = this.session.openStream(
-      "events/stream",
-      { name, arguments: args, cursor },
-      (method, params) => this.consume(sub.id, method, params),
-    );
-    sub.id = stream.id;
-    const active = new Promise<void>((ready, fail) => {
-      const timer = setTimeout(() => {
-        void this.cancel(sub.id, "Event stream activation timed out");
-      }, this.timeoutMs);
-      this.streams.set(sub.id, {
-        sub,
-        stream,
-        ready,
-        fail,
-        timer,
-        seen: new Set(),
-      });
+    let ready!: () => void, fail!: (e: Error) => void;
+    const active = new Promise<void>((resolve, reject) => {
+      ready = resolve;
+      fail = reject;
     });
+    const item: Item = {
+      sub,
+      ready,
+      fail,
+      seen: new Set(),
+      activated: false,
+      attempts: 0,
+      outage: false,
+    };
+    this.open(item);
     const cancelled = () => {
       void this.cancel(sub.id);
     };
     signal?.addEventListener("abort", cancelled, { once: true });
     if (signal?.aborted) cancelled();
-    void stream.closed.then((end) => this.finish(sub.id, end));
     try {
-      await Promise.all([stream.sent, active]);
+      await active;
       if (sub.status !== "active")
         throw new Error(
           sub.error ?? "Event stream ended before subscription completed",
         );
       return sub;
-    } catch (error) {
-      await this.cancel(
-        sub.id,
-        error instanceof Error ? error.message : "Subscription failed",
-      );
-      throw error;
     } finally {
       signal?.removeEventListener("abort", cancelled);
     }
   }
-  private consume(
-    id: string,
-    method: string,
-    p: Record<string, unknown>,
-  ): void {
-    const item = this.streams.get(id);
-    if (!item) return;
+  private open(item: Item) {
+    const { sub } = item;
+    const stream = this.session.openStream(
+      "events/stream",
+      {
+        name: sub.name,
+        arguments: sub.arguments,
+        cursor: sub.cursor,
+        ...(sub.maxAgeMs === undefined ? {} : { maxAgeMs: sub.maxAgeMs }),
+      },
+      (method, params) => {
+        if (item.stream === stream && this.streams.get(sub.id) === item)
+          this.consume(item, method, params);
+      },
+    );
+    sub.id ||= stream.id;
+    item.stream = stream;
+    this.streams.set(sub.id, item);
+    clearTimeout(item.timer);
+    item.timer = setTimeout(
+      () =>
+        this.interrupted(item, {
+          reason: "disconnected",
+          error: "Event stream activation timed out",
+        }),
+      this.timeoutMs,
+    );
+    void stream.sent.catch((error) => {
+      if (item.stream === stream)
+        this.interrupted(item, { reason: "error", error: errorText(error) });
+    });
+    void stream.closed.then((end) => {
+      if (item.stream === stream) this.interrupted(item, end);
+    });
+  }
+  private heartbeat(item: Item) {
+    clearTimeout(item.timer);
+    item.timer = setTimeout(
+      () =>
+        this.interrupted(item, {
+          reason: "disconnected",
+          error: "Event stream heartbeat timed out",
+        }),
+      this.options.heartbeatTimeoutMs ?? 65000,
+    );
+    item.timer.unref?.();
+  }
+  private consume(item: Item, method: string, p: Record<string, unknown>) {
     const { sub } = item;
     if (!record(p)) return;
     if (method === "notifications/events/active") {
-      if (sub.status !== "opening") return;
-      clearTimeout(item.timer);
+      const alreadyActive = item.activated;
+      sub.cursor = typeof p.cursor === "string" ? p.cursor : null;
+      const wasTruncated = sub.truncated;
+      const gap = p.truncated === true && sub.cursor !== null;
+      sub.truncated = item.outage ? !!sub.truncated || gap : gap;
       sub.status = "active";
-      if (typeof p.cursor === "string") sub.cursor = p.cursor;
-      if (p.truncated) this.onGap(sub);
+      sub.error = undefined;
+      sub.endReason = undefined;
+      item.activated = true;
+      // A valid heartbeat/event resets retries, so repeated ack-then-drop cannot loop forever.
+      this.heartbeat(item);
+      if (gap && (!item.outage || !wasTruncated)) this.onGap(sub);
       item.ready();
-      this.onStatus(sub, false);
+      this.onStatus(sub, alreadyActive && sub.truncated && !item.outage);
     } else if (method === "notifications/events/event") {
       if (
         sub.status !== "active" ||
@@ -196,21 +296,36 @@ export class EventConnection {
         p.timestamp.length > 80
       )
         return;
-      if (item.seen.has(p.eventId)) return;
+      sub.cursor = typeof p.cursor === "string" ? p.cursor : null;
+      item.attempts = 0;
+      item.outage = false;
+      this.heartbeat(item);
+      if (item.seen.has(p.eventId)) {
+        this.onStatus(sub, false);
+        return;
+      }
       item.seen.add(p.eventId);
       if (item.seen.size > 10000)
         item.seen.delete(item.seen.values().next().value!);
-      if (typeof p.cursor === "string") sub.cursor = p.cursor;
       sub.error = undefined;
       this.onEvent(sub, {
         eventId: p.eventId,
         name: p.name,
         timestamp: p.timestamp,
-        cursor: typeof p.cursor === "string" ? p.cursor : undefined,
+        cursor: sub.cursor,
         data: p.data,
       });
-    } else if (method === "notifications/events/heartbeat") {
-      if (typeof p.cursor === "string") sub.cursor = p.cursor;
+    } else if (
+      method === "notifications/events/heartbeat" &&
+      sub.status === "active"
+    ) {
+      sub.cursor = typeof p.cursor === "string" ? p.cursor : null;
+      item.attempts = 0;
+      const recovered = item.outage;
+      item.outage = false;
+      sub.error = undefined;
+      this.heartbeat(item);
+      this.onStatus(sub, recovered);
     } else if (method === "notifications/events/error") {
       const error =
         record(p.error) && typeof p.error.message === "string"
@@ -220,15 +335,71 @@ export class EventConnection {
         sub.error = error;
         this.onStatus(sub, sub.status === "active");
       }
+    } else if (method === "notifications/events/terminated") {
+      this.finish(item, {
+        reason: "error",
+        error:
+          record(p.error) && typeof p.error.message === "string"
+            ? p.error.message
+            : "Event subscription terminated",
+      });
     }
-    return;
   }
-  private finish(id: string, end: ProtocolEnd) {
-    const item = this.streams.get(id);
-    if (!item) return;
-    const wasActive = item.sub.status === "active";
-    this.streams.delete(id);
+  private interrupted(item: Item, end: ProtocolEnd) {
+    if (this.streams.get(item.sub.id) !== item) return;
+    const stream = item.stream;
+    item.stream = undefined;
     clearTimeout(item.timer);
+    void stream?.cancel();
+    // Explicit RPC errors/termination and deliberate completion are terminal.
+    if (
+      !item.activated ||
+      !this.options.reconnect ||
+      end.reason === "ended" ||
+      end.reason === "cancelled" ||
+      end.protocolError ||
+      this.closed
+    ) {
+      this.finish(item, end);
+      return;
+    }
+    const wasRecovering = item.outage;
+    item.outage = true;
+    if (item.attempts >= (this.options.maxRetries ?? 5)) {
+      this.finish(item, {
+        reason: "error",
+        error: `Reconnect attempts exhausted: ${end.error ?? "stream interrupted"}`,
+      });
+      return;
+    }
+    item.sub.status = "reconnecting";
+    item.sub.error = end.error ?? "Event stream interrupted";
+    item.sub.endReason = end.reason;
+    if (!wasRecovering) this.onStatus(item.sub, true);
+    const delay = Math.min(
+      30000,
+      (this.options.retryBaseMs ?? 1000) * 2 ** item.attempts++,
+    );
+    item.timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await this.availableSession();
+          if (this.closed || this.streams.get(item.sub.id) !== item) return;
+          this.open(item);
+        } catch (error) {
+          this.interrupted(item, { reason: "error", error: errorText(error) });
+        }
+      })();
+    }, delay);
+    item.timer.unref?.();
+  }
+  private finish(item: Item, end: ProtocolEnd) {
+    if (this.streams.get(item.sub.id) !== item) return;
+    this.streams.delete(item.sub.id);
+    clearTimeout(item.timer);
+    const stream = item.stream;
+    item.stream = undefined;
+    void stream?.cancel();
     item.sub.status =
       end.reason === "cancelled"
         ? "stopped"
@@ -245,28 +416,28 @@ export class EventConnection {
             : "Event stream ended"),
       ),
     );
-    this.onStatus(item.sub, wasActive && end.reason !== "cancelled");
+    this.onStatus(item.sub, item.activated && end.reason !== "cancelled");
   }
   async cancel(id: string, error?: string) {
     const item = this.streams.get(id);
     if (!item) return;
+    const stream = item.stream;
     this.finish(
-      id,
+      item,
       error ? { reason: "error", error } : { reason: "cancelled" },
     );
-    await item.stream.cancel();
+    await stream?.cancel();
   }
   close(error?: string) {
     if (this.closed) return;
     this.closed = true;
-    for (const [id, item] of this.streams) {
+    for (const item of [...this.streams.values()])
       this.finish(
-        id,
+        item,
         error ? { reason: "disconnected", error } : { reason: "cancelled" },
       );
-      void item.stream.cancel();
-    }
     this.session.signal.removeEventListener("abort", this.disconnected);
     this.session.close();
+    this.options.onClose?.();
   }
 }

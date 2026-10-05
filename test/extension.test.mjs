@@ -127,7 +127,10 @@ test("HTTP streams use the adapter and failed subscriptions do not leave active 
   await local.hooks.get("session_shutdown")();
   await http.hooks.get("session_shutdown")();
   assert.equal(http.connection.activeProtocolOperations, 0);
-  assert.equal(http.sent.some(message => message.method === "notifications/cancelled"), false);
+  assert.equal(
+    http.sent.some((message) => message.method === "notifications/cancelled"),
+    false,
+  );
 });
 for (const reason of ["ended", "failed", "disconnected"])
   test(`unexpected ${reason} enters context and wakes the agent once`, async () => {
@@ -140,14 +143,18 @@ for (const reason of ["ended", "failed", "disconnected"])
         id,
         ...(reason === "ended"
           ? { result: {} }
-          : { error: { message: "upstream failed" } }),
+          : { error: { code: -32012, message: "upstream failed" } }),
       });
     await pause(550);
     assert.equal(h.messages.length, 1);
     assert.equal(h.messages[0][0].customType, "mcp-events-status");
     assert.equal(
       h.messages[0][0].details.subscriptions[0].status,
-      reason === "ended" ? "ended" : "failed",
+      reason === "ended"
+        ? "ended"
+        : reason === "disconnected"
+          ? "reconnecting"
+          : "failed",
     );
     assert.deepEqual(h.messages[0][1], {
       triggerTurn: true,

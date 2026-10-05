@@ -9,6 +9,7 @@ export const EVENTS_PROTOCOL = {
     "notifications/events/event",
     "notifications/events/heartbeat",
     "notifications/events/error",
+    "notifications/events/terminated",
   ],
 };
 export interface ProtocolEnd {
