@@ -3,10 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Client } from "@modelcontextprotocol/client";
-import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { EventConnection } from "../dist/stream.js";
-import { adapter } from "./protocol-fixture.mjs";
+import { adapter, McpServerManager } from "./protocol-fixture.mjs";
 import { EVENTS_PROTOCOL } from "../dist/protocol.js";
 import { EventBatcher } from "../dist/batch.js";
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -22,28 +20,22 @@ for (const modern of [false, true])
     const dir = await mkdtemp(join(tmpdir(), "pi-events-test-"));
     const state = join(dir, "state.json");
     await writeFile(state, JSON.stringify({ comments: [] }));
-    const client = new Client(
-      { name: "events-test", version: "1" },
-      modern ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : {},
-    );
-    const transport = new StdioClientTransport({
+    const manager = new McpServerManager();
+    t.after(async () => {
+      await manager.closeAll();
+      await rm(dir, { recursive: true, force: true });
+    });
+    const connection = await manager.connect("figma", {
       command: process.execPath,
       args: [new URL("./figma-fixture.mjs", import.meta.url).pathname],
       env: { FIGMA_FIXTURE_STATE: state },
-      stderr: "pipe",
+      protocolVersion: modern ? "2026-07-28" : "legacy",
     });
-    await client.connect(transport);
+    const { client } = connection;
     assert.equal(client.getProtocolEra(), modern ? "modern" : "legacy");
     const controller = new AbortController();
     const mediated = adapter.createProtocolSession(
-      {
-        status: "connected",
-        definition: { command: "node" },
-        client,
-        transport,
-        inFlight: 0,
-        lastUsedAt: 0,
-      },
+      connection,
       controller.signal,
       EVENTS_PROTOCOL,
     );
@@ -57,8 +49,7 @@ for (const modern of [false, true])
     );
     t.after(async () => {
       conn.close();
-      await client.close();
-      await rm(dir, { recursive: true, force: true });
+      controller.abort();
     });
     assert.equal((await conn.catalog()).length, 9);
     assert.equal((await client.listTools()).tools.length, 5);

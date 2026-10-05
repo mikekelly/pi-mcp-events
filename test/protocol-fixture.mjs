@@ -9,3 +9,7 @@ const entry = source
       import.meta.resolve("@realmikekelly/pi-mcp-adapter"),
     ).href;
 export const adapter = await import(entry);
+
+export const { McpServerManager } = await import(
+  new URL("./server-manager.ts", entry).href
+);
