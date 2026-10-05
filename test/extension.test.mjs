@@ -10,6 +10,7 @@ function host(kind = "stdio") {
     bus = new Map();
   let tool;
   const transport = {
+    hasPerRequestStream: kind === "http",
     async send(message) {
       sent.push(message);
       if (message.method === "events/stream") notify(message.id, "active");
@@ -112,9 +113,11 @@ test("active is rendered in the tool result; events wake once; shutdown suppress
     [],
   );
 });
-test("unsupported transport and failed subscription do not leave active operations", async () => {
+test("HTTP streams use the adapter and failed subscriptions do not leave active operations", async () => {
   const http = host("http");
-  assert.match((await http.call(subscribe)).details.error, /stdio/);
+  const subscribed = await http.call(subscribe);
+  assert.equal(subscribed.details.subscription.status, "active");
+  assert.equal(http.connection.activeProtocolOperations, 1);
   const local = host();
   assert.match(
     (await local.call({ ...subscribe, name: "unknown" })).details.error,
@@ -123,6 +126,8 @@ test("unsupported transport and failed subscription do not leave active operatio
   assert.equal(local.connection.activeProtocolOperations, 0);
   await local.hooks.get("session_shutdown")();
   await http.hooks.get("session_shutdown")();
+  assert.equal(http.connection.activeProtocolOperations, 0);
+  assert.equal(http.sent.some(message => message.method === "notifications/cancelled"), false);
 });
 for (const reason of ["ended", "failed", "disconnected"])
   test(`unexpected ${reason} enters context and wakes the agent once`, async () => {

@@ -14,6 +14,11 @@ export const EVENTS_PROTOCOL = {
 export interface ProtocolEnd {
   reason: "cancelled" | "ended" | "error" | "disconnected";
   error?: string;
+  protocolError?: { code: number; message: string; data?: unknown };
+}
+export interface ProtocolWatch {
+  readonly closed: Promise<ProtocolEnd>;
+  close(): void;
 }
 export interface ProtocolStream {
   readonly id: string;
@@ -23,6 +28,10 @@ export interface ProtocolStream {
 }
 export interface ProtocolSession {
   readonly signal: AbortSignal;
+  watchNotifications(
+    methods: string[],
+    onNotification: (method: string, params: Record<string, unknown>) => void,
+  ): ProtocolWatch;
   request(
     method: string,
     params?: Record<string, unknown>,
