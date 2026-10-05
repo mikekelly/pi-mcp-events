@@ -1,8 +1,10 @@
 # Pi MCP Events
 
-An event-stream companion to [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter). Your agent subscribes to an MCP event, finishes its turn, and wakes when the event arrives. A server can expose both ordinary tools and events through the same connection.
+Your agent updates a design in Figma, gives you a link, and asks you to review it. Before finishing its turn, it subscribes to comments and changes on the file, page, section, or frame it is working on. You open the link and leave feedback in Figma. When that feedback arrives, Pi wakes up, reads it, and can revise the design through the official Figma MCP. You can keep collaborating through comments and design changes without copying each update back into the terminal.
 
-The adapter owns server configuration, authentication, connections, tool discovery and its management UI. This companion adds the `mcp_events` tool and visible event messages that can wake an idle Pi session.
+Pi MCP Events adds event subscriptions and idle wakeups to [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter). The adapter supplies MCP connections, authentication, ordinary tools, and its management UI; this package supplies the `mcp_events` tool and delivers incoming activity into the agent's context. A server can offer both tools and events through the same connection.
+
+For the Figma workflow, the **official remote Figma MCP** reads and edits designs, while [**Figma listen**](https://github.com/mikekelly/figma-listen) observes comments and changes. Pi MCP Events connects that activity to the running agent. Keep Pi open while you review; comments arrive after polling detects them, and design changes are grouped until the default 120-second quiet period.
 
 ## Install
 
@@ -25,15 +27,36 @@ Both packages must be installed as Pi extensions. The companion deliberately doe
 
 If the adapter is missing, disabled, or lacks the required hook, the first `mcp_events` catalog or subscribe request returns an error with the replacement install command and restart instructions. Pi also shows those instructions as a warning once per session. Compatibility is checked when you use the tool, not at startup. Pi stays running, and the extension does not install packages or launch a separate MCP server to work around the missing hook.
 
-## Try it with Figma listen
+## Set up Figma collaboration
 
-[Figma listen](https://github.com/mikekelly/figma-listen) is a companion to the official Figma MCP. The official MCP lets an agent work on designs; Figma listen observes feedback and edits. Generate a Figma personal access token with read scopes and export `FIGMA_ACCESS_TOKEN` in the environment used to launch Pi. See Figma listen's README for token setup.
+The following setup was verified with Pi 1.0.3, adapter fork 5.1.0, Pi MCP Events 0.2.0, Figma listen 1.3.1, and `pi-figma-remote-auth` 0.1.3. Install the adapter and Events packages above first, and sign Pi in to your chosen model provider (for example, use `/login` for ChatGPT).
 
-Add this server to your existing adapter config, such as `~/.config/mcp/mcp.json` or your project's `.mcp.json`:
+### 1. Generate a token for Figma listen
+
+In Figma, go to **Settings → Security → Personal access tokens → Generate new token**. Give it a name, set its expiration to 90 days, and select all read scopes.
+
+Export it in the shell that launches Pi, for example from your existing shell credentials file:
+
+```sh
+export FIGMA_ACCESS_TOKEN="YOUR_FIGMA_PERSONAL_ACCESS_TOKEN"
+```
+
+Start a new terminal or reload your shell configuration after adding it. This PAT is used by Figma listen's REST API polling. The official remote MCP uses a separate OAuth login.
+
+### 2. Configure both Figma servers
+
+Merge these entries into `~/.pi/agent/mcp-adapter.json`, preserving any existing servers and settings:
 
 ```json
 {
   "mcpServers": {
+    "figma": {
+      "url": "https://mcp.figma.com/mcp",
+      "auth": "oauth",
+      "lifecycle": "lazy",
+      "exposeResources": true,
+      "directTools": false
+    },
     "figma-listen": {
       "command": "npx",
       "args": ["-y", "@realmikekelly/figma-listen@1.3.1"],
@@ -43,15 +66,57 @@ Add this server to your existing adapter config, such as `~/.config/mcp/mcp.json
 }
 ```
 
+`exposeResources` makes Figma's skill and reference resources available through the adapter. Use the remote server named `figma` for canvas edits. If you previously configured `figma-desktop`, disable that entry with `"disabled": true` or remove it to avoid selecting its read-only tools.
+
+### 3. Authenticate the official remote MCP
+
+Figma currently restricts remote MCP access to [approved clients](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/), and Pi is not on that list. The third-party [pi-figma-remote-auth](https://pi.dev/packages/pi-figma-remote-auth) package provides an OAuth workaround: it registers with the client name `Codex` and saves credentials for the adapter. This worked in our live test; it is not official Pi support and depends on Figma continuing to accept that registration.
+
+```sh
+pi install npm:pi-figma-remote-auth@0.1.3
+```
+
+Restart Pi, then run this command **inside Pi**:
+
+```text
+/figma-remote-auth login --server figma
+```
+
+Confirm the login, open the printed URL in your browser, and approve access to your Figma account. The consent screen may identify the client as **Codex**. The helper saves the OAuth credentials; adapter 5.1.0 imports them into the OS credential store on connection and removes the temporary plaintext token file. Restart Pi after login.
+
+**Skip `/figma-remote-auth setup` with the versions above.** Its 0.1.3 setup command writes the adapter's older `auth: "oauth"` format into `~/.pi/agent/mcp.json`. Pi 1.0.3 interprets that file using its native MCP schema, so the adapter skips the entry with `auth.provider must be a provider name`. The `mcp-adapter.json` configuration in step 2 is the verified fix. If you already ran setup, move only that `figma` entry into `mcp-adapter.json` and remove the duplicate from `mcp.json`; preserve your other entries.
+
+### 4. Verify the connection
+
 Ask Pi:
 
-> Use mcp_events to discover events on figma-listen, subscribe to new comments tagged #bot in this Figma file, then finish your turn. When feedback arrives, tell me what changed.
+> Connect to the remote MCP server named figma, call whoami, and confirm that use_figma is available. Then use mcp_events to list the event catalog on figma-listen. Do not change any designs yet.
 
-The tool calls are:
+The remote server should identify your Figma account and expose `figma_use_figma`. Figma listen should list comment, reaction, design-change, and scope-deletion events. Figma account permissions and MCP access limits still apply. The remote setup does not require the Figma desktop app to stay open.
+
+### 5. Work together in Figma
+
+Give Pi a Figma link and a design task, then ask it to keep listening when it hands the design back for review. For example:
+
+> Update this frame as discussed: FIGMA_FRAME_URL. Use the remote figma MCP for edits. When ready, give me a link and ask me to review it in Figma. Use mcp_events on figma-listen to subscribe to new and edited comments and design changes scoped to this frame, then finish your turn. I'll leave comments or make changes in Figma. When events arrive, inspect the relevant design, respond to my feedback within the agreed task, and give me an updated link in Pi. Keep listening until I ask you to stop. Recognize your own edits so they do not cause an edit feedback loop.
+
+You can now leave a comment in Figma, see Pi wake and revise the design, and review the next iteration in the same file. You can also adjust the design yourself and have Pi respond to the resulting changeset. The agent reports back in Pi and through its canvas edits; this setup does not add a tool for the agent to post Figma comment replies.
+
+Scope subscriptions to the work being reviewed. For page, section, or frame scopes, anchor comments to nodes within that scope; use file scope for file-wide feedback. Subscriptions are in memory: keep that Pi session running, and subscribe again after restarting or reloading it.
+
+For a quieter comment channel, ask for a `#bot` tag filter and `include_thread_replies: true`. That includes untagged replies in a tagged thread, so a follow-up such as “done” does not also need the tag. Omit `tag` to receive all matching comments. Tags filter comments and reactions, not design changes.
+
+Design notifications identify changed nodes and property names. The agent should read the current design through the official MCP when it needs the new values. The agent's own canvas writes can also produce events; there is no automatic suppression of self-authored edits. It can unsubscribe before making a revision and subscribe again afterwards, or recognize changes it already made before deciding whether to act.
+
+### Native subscription examples
+
+Discover event schemas first:
 
 ```json
 { "action": "catalog", "server": "figma-listen" }
 ```
+
+Subscribe to comments on a frame (replace the example IDs):
 
 ```json
 {
@@ -59,17 +124,33 @@ The tool calls are:
   "server": "figma-listen",
   "name": "figma.comment.created",
   "arguments": {
-    "scope": { "kind": "file", "file_key": "YOUR_FILE_KEY" },
-    "tag": "#bot"
+    "scope": { "kind": "frame", "file_key": "YOUR_FILE_KEY", "node_id": "123:456" },
+    "tag": "#bot",
+    "include_thread_replies": true
   }
 }
 ```
 
-For edits, subscribe separately to `figma.design.changed`. Figma listen supports file, page, section and frame scopes; use the event catalog's input schema for exact arguments. Design events arrive after the default 120-second quiet period. Comments arrive when polling detects them, subject to Figma's rate limits.
+Subscribe separately to edits in that frame:
 
-`mcp_events` exposes `catalog`, `subscribe`, `list` and `unsubscribe`. Pass a returned `subscription_id` to unsubscribe. The subscribe result is returned only after the server acknowledges the native stream. Identical active or reconnecting requests are reused when their argument JSON matches. The subscription ID remains stable through reconnects. Optional `max_age_ms` bounds cursor replay; omit it to use the server’s replay policy.
+```json
+{
+  "action": "subscribe",
+  "server": "figma-listen",
+  "name": "figma.design.changed",
+  "arguments": {
+    "scope": { "kind": "frame", "file_key": "YOUR_FILE_KEY", "node_id": "123:456" }
+  }
+}
+```
+
+Subscribe separately to `figma.comment.edited` if existing comment edits should also wake the agent. File, page, section, and frame scopes are supported; consult the catalog's input schema for exact arguments.
+
+`mcp_events` exposes `catalog`, `subscribe`, `list`, and `unsubscribe`. Pass a returned `subscription_id` to unsubscribe. The subscribe result is returned only after the server acknowledges the native stream. Identical active or reconnecting requests are reused when their argument JSON matches. The subscription ID remains stable through reconnects. Optional `max_age_ms` bounds cursor replay; omit it to use the server's replay policy.
 
 Use `mcp_events` for wakeups. Figma listen's `listen_subscribe` and `listen_get_events` tools provide a separate retrieval workflow; calling them does not open a native event stream.
+
+This complete write → subscribe → idle → external edit → wake → write-back loop passed in Pi's interactive terminal with the published packages. See [live verification](docs/verification.md#remote-figma-writes-and-live-idle-wakeup--2026-10-05).
 
 ## How it works
 
@@ -122,4 +203,4 @@ FIGMA_LIVE_FILE=YOUR_FILE_KEY FIGMA_LIVE_FRAME=YOUR_FRAME_ID node scripts/idle-t
 
 After `IDLE_CONFIRMED`, rename a child node to a unique name beginning `PI-LIVE-` and change its fill in Figma. The test allows five minutes for detection, the quiet period and model response. Remove your test frame afterwards. The script does not edit Figma itself.
 
-The original live Figma test passed on 2026-10-05 with Pi 1.0.3 and the earlier adapter hook. The mediated protocol refactor was verified separately against published Figma listen 1.3.1 with controlled snapshots and a real Pi model, including disconnect wakeup and quiet shutdown. In the live test, Pi identified the changed rectangle's name and fill with no additional prompt. The temporary frame was removed. See [test evidence](docs/verification.md).
+The published 0.2.0 / 5.1.0 pair was also verified in Pi's interactive terminal against real Figma: Pi created a disposable design, subscribed, went idle, received an external change through Figma listen, and wrote a revision through the official remote MCP without another prompt. Earlier runs cover comment wakeups, recovery, and shutdown. See [test evidence](docs/verification.md).
