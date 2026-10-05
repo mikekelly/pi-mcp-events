@@ -13,9 +13,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 const root = resolve(import.meta.dirname, "..");
 const releaseRoot = process.env.PI_EVENTS_RELEASE_ROOT;
-const adapterEntry = releaseRoot
-  ? pathToFileURL(join(releaseRoot, "@realmikekelly/pi-mcp-adapter/index.ts")).href
-  : import.meta.resolve("@realmikekelly/pi-mcp-adapter");
+const adapterEntry = process.env.PI_MCP_ADAPTER_SOURCE
+  ? pathToFileURL(join(process.env.PI_MCP_ADAPTER_SOURCE, "index.ts")).href
+  : releaseRoot
+    ? pathToFileURL(join(releaseRoot, "@realmikekelly/pi-mcp-adapter/index.ts"))
+        .href
+    : import.meta.resolve("@realmikekelly/pi-mcp-adapter");
 const eventsEntry = releaseRoot
   ? join(releaseRoot, "@realmikekelly/pi-mcp-events/dist/index.js")
   : join(root, "dist/index.js");
@@ -53,10 +56,7 @@ const loader = new DefaultResourceLoader({
   cwd: dir,
   agentDir: dir,
   settingsManager,
-  additionalExtensionPaths: [
-    join(dir, "adapter.ts"),
-    eventsEntry,
-  ],
+  additionalExtensionPaths: [join(dir, "adapter.ts"), eventsEntry],
   noSkills: true,
   noPromptTemplates: true,
   noThemes: true,
@@ -101,7 +101,7 @@ try {
   await session.prompt(
     live
       ? `Use mcp_events to subscribe to figma.design.changed on server figma with arguments ${JSON.stringify({ scope: { kind: "frame", file_key: process.env.FIGMA_LIVE_FILE, node_id: process.env.FIGMA_LIVE_FRAME } })}. Once active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply briefly identifying the changed node name and property.`
-      : 'Use mcp_events to subscribe to figma.comment.created on server figma with arguments {"scope":{"kind":"file","file_key":"fileA"},"tag":"#bot"}. Once the subscription is active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply with its comment text only.',
+      : 'Use mcp_events to subscribe to figma.comment.created on server figma with arguments {"scope":{"kind":"file","file_key":"fileA"},"tag":"#bot"}. Once the subscription is active, reply SUBSCRIBED and end your turn. Do not poll or wait. When an MCP event arrives later, reply with its comment text only. If the subscription later fails or ends, reply STREAM_STOPPED and do not resubscribe.',
   );
   assert.match(session.getLastAssistantText(), /SUBSCRIBED/);
   assert.equal(session.isStreaming, false);
@@ -147,7 +147,9 @@ try {
   const result = {
     passed: true,
     pi: "1.0.3",
-    adapter: "@realmikekelly/pi-mcp-adapter@5.0.1",
+    adapter:
+      process.env.PI_MCP_ADAPTER_SOURCE ??
+      "development dependency (protocol-extension API)",
     figma_listen: "1.3.1",
     upstream: live ? "live Figma REST" : "synthetic snapshot",
     native_subscription: true,
@@ -160,14 +162,43 @@ try {
     response: session.getLastAssistantText(),
     evidence: dir,
   };
+  if (!live) {
+    const beforeDisconnect = starts;
+    await writeFile(state, JSON.stringify({ comments: [], exit: true }));
+    for (let i = 0; i < 900; i++) {
+      if (
+        starts > beforeDisconnect &&
+        !session.isStreaming &&
+        session.getLastAssistantText()?.includes("STREAM_STOPPED")
+      )
+        break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(
+      starts,
+      beforeDisconnect + 1,
+      "Disconnect must trigger exactly one follow-up turn",
+    );
+    assert.match(session.getLastAssistantText(), /STREAM_STOPPED/);
+    result.disconnect_wakeup = true;
+    result.disconnect_response = session.getLastAssistantText();
+    result.finalStarts = starts;
+  }
   await writeFile(join(dir, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
 } finally {
   await writeFile(join(dir, "events.json"), JSON.stringify(log, null, 2));
+  const beforeShutdown = starts;
   await session.extensionRunner.emit({
     type: "session_shutdown",
     reason: "quit",
   });
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(
+    starts,
+    beforeShutdown,
+    "Session shutdown must not trigger a turn",
+  );
   session.dispose();
   console.log("EVIDENCE", dir);
 }

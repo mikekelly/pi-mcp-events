@@ -6,13 +6,17 @@ The adapter owns server configuration, authentication, connections, tool discove
 
 ## Install
 
-Requires Node 22.19+ and Pi 1.0.3+. For now, use [Mike Kelly's adapter fork](https://github.com/mikekelly/pi-mcp-adapter), which includes the connection hook needed by this package. Unmodified upstream pi-mcp-adapter 5.0.0 does not expose that hook.
+**This branch prepares Pi MCP Events 0.2.0 and requires adapter fork 5.1.0 or newer. The previously published 0.1.0 / 5.0.1 pair uses the older API and must be upgraded together when these releases are published.**
+
+Requires Node 22.19+ and Pi 1.0.3+. For now, use [Mike Kelly's adapter fork](https://github.com/mikekelly/pi-mcp-adapter), which includes the mediated protocol-extension hook needed by this package. Unmodified upstream pi-mcp-adapter 5.0.0 does not expose that hook.
+
+Once those versions are published:
 
 ```sh
 # Skip removal if the upstream adapter is not installed.
 pi remove npm:pi-mcp-adapter
-pi install npm:@realmikekelly/pi-mcp-adapter
-pi install npm:@realmikekelly/pi-mcp-events
+pi install npm:@realmikekelly/pi-mcp-adapter@^5.1.0
+pi install npm:@realmikekelly/pi-mcp-events@^0.2.0
 ```
 
 Use the full `npm:@realmikekelly/pi-mcp-events` source: `npm:` tells Pi to install from npm, and `@realmikekelly/` is part of the published package name. A bare `pi install pi-mcp-events` is treated as a local path.
@@ -71,17 +75,18 @@ Use `mcp_events` for wakeups. Figma listen's `listen_subscribe` and `listen_get_
 
 ## How it works
 
-1. The companion requests a lease on the adapter's configured connection. The lease prevents idle disconnection while subscribed and ends on adapter shutdown or disconnect.
-2. It discovers event types using `events/list` and opens `events/stream` with draft push delivery.
-3. It routes correlated `notifications/events/*` messages, leaving other traffic with the adapter and SDK. Normal MCP tools remain available.
+1. The companion registers the `events` protocol with the adapter: `events/list`, `events/stream`, and the supported `notifications/events/*` methods. Registration does not subscribe to anything.
+2. When explicitly requested, it discovers event types and opens a stream through the adapter's mediated API. The companion receives no SDK client or raw transport.
+3. The adapter routes notifications by declared method and subscription ID, owns cancellation, and prevents idle disconnection while operations are active. Core MCP methods, including tool calls, cannot be sent through this extension point. Normal MCP tools remain available.
 4. Events are collected over a fixed 500ms window and delivered with Pi's `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })`. Idle Pi sessions start a turn; busy sessions receive a queued follow-up.
-5. Unsubscribe cancels the stream. Session shutdown cancels streams, clears pending batches and releases connections.
+5. The initial `notifications/events/active` acknowledgement is rendered in the subscribe tool result. Unexpected stream endings, failures, and disconnects become visible status messages that wake Pi. These are batched over 500ms so several streams closing together do not each start a turn. A recoverable upstream error is reported while the subscription remains active.
+6. Requested cancellation is rendered in the unsubscribe tool result without an extra turn. Session shutdown cancels streams and clears both event and status batches, including when the adapter's shutdown hook runs first.
 
 The MCP Events wire format is experimental. This implementation supports local **stdio** transport only. HTTP, SSE, WebSocket and webhook delivery are outside this version. Legacy and modern MCP handshakes have protocol test coverage; the real Pi model tests used the adapter's legacy handshake.
 
 Subscriptions and deduplication state live in memory, scoped to the Pi extension session. There is no shared daemon or subscription file. Independent Pi processes can subscribe independently. A restarted, reloaded or disconnected session must subscribe again; there is no automatic reconnect or replay persistence. You may pass a cursor when subscribing if the server supports replay. Truncated replay produces a warning.
 
-Heartbeat notifications do not wake the model. Duplicate event IDs are suppressed within a bounded 10,000-ID window per stream. Upstream errors appear as warnings and in subscription status. Payloads are external data, not new user instructions.
+Heartbeat notifications do not wake the model. Duplicate event IDs are suppressed within a bounded 10,000-ID window per stream. Upstream errors appear as warnings, in subscription status, and in context when they occur on an active stream. Payloads are external data, not new user instructions.
 
 Limits: 100 recorded subscriptions per session (unsubscribe to remove old entries); 256 events or 64,000 JSON characters per batch; large individual event payloads are shortened. Overflow counts and truncation markers are visible to the agent. This is bounded delivery, not a durable message queue.
 
@@ -93,14 +98,23 @@ cd pi-mcp-events
 npm ci
 ```
 
-The development dependencies include the published adapter fork. The original minimal upstream patch is preserved in `patches/pi-mcp-adapter-5.0.0.patch` (base commit `85db03d87cd0f7461b55eab8d25c10bce473b801`); normal installation does not require applying it.
+The development dependency pins the compatible adapter fork by Git commit, so `npm ci` tests the new API even before its npm release. To try this unreleased pair locally after cloning and building:
+
+```sh
+npm run build
+# Remove any existing adapter/events registrations first; keep one of each.
+pi install ./node_modules/@realmikekelly/pi-mcp-adapter
+pi install .
+```
+
+Restart Pi. These local paths must remain on disk. The old connection-lease API is intentionally unsupported.
 
 ```sh
 npm run check
 node scripts/idle-test.mjs
 ```
 
-The first command runs deterministic protocol, routing, batching and extension lifecycle tests, including the published Figma listen server. The second requires existing Pi ChatGPT authentication, uses a real Pi model and a controlled Figma snapshot fixture, and checks that an event alone starts a second turn after the first finishes. It does not need a Figma token. `node scripts/login.mjs` can perform the ChatGPT login interactively.
+The first command runs deterministic protocol, routing, batching and extension lifecycle tests, including the published Figma listen server. The second requires existing Pi ChatGPT authentication, uses a real Pi model and a controlled Figma snapshot fixture, and checks that an event alone starts a second turn after the first finishes, then closes the synthetic server and verifies a separate disconnect notification wakes the agent. It also checks that session shutdown does not start another turn. It does not need a Figma token. `node scripts/login.mjs` can perform the ChatGPT login interactively.
 
 For a live test, create a disposable frame, then run:
 
@@ -110,4 +124,4 @@ FIGMA_LIVE_FILE=YOUR_FILE_KEY FIGMA_LIVE_FRAME=YOUR_FRAME_ID node scripts/idle-t
 
 After `IDLE_CONFIRMED`, rename a child node to a unique name beginning `PI-LIVE-` and change its fill in Figma. The test allows five minutes for detection, the quiet period and model response. Remove your test frame afterwards. The script does not edit Figma itself.
 
-Both real-model tests passed on 2026-10-05 with Pi 1.0.3, patched pi-mcp-adapter 5.0.0 and Figma listen 1.3.1. In the live test, Pi identified the changed rectangle's name and fill with no additional prompt. The temporary frame was removed. See [test evidence](docs/verification.md).
+The original live Figma test passed on 2026-10-05 with Pi 1.0.3 and the earlier adapter hook. The mediated protocol refactor was verified separately against published Figma listen 1.3.1 with controlled snapshots and a real Pi model, including disconnect wakeup and quiet shutdown. In the live test, Pi identified the changed rectangle's name and fill with no additional prompt. The temporary frame was removed. See [test evidence](docs/verification.md).

@@ -8,7 +8,9 @@ const state = process.env.FIGMA_FIXTURE_STATE;
 const read = async () => JSON.parse(await readFile(state, "utf8"));
 const fake = {
   async comments() {
-    return (await read()).comments;
+    const snapshot = await read();
+    if (snapshot.exit) process.exit(0);
+    return snapshot.comments;
   },
   async discover(scope) {
     return { files: [{ key: scope.file_key }], warnings: [] };

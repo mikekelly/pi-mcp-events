@@ -16,3 +16,11 @@ The live subscription was scoped to a disposable frame. The default 120-second q
 A repeat synthetic test passed using the final fork identity `@realmikekelly/pi-mcp-adapter@5.0.1`: the event alone started the second turn and the model echoed the new tagged comment. Evidence logs are retained locally and are not included in the published package.
 
 Subsequent deterministic tests cover payload bounds, connection cleanup and rejection of unsupported transports. The model test verifies the actual Pi runtime wakeup; it does not claim a dedicated interactive adapter subscriptions UI was implemented or visually tested.
+
+## Mediated protocol refactor — 2026-10-05
+
+The refactor replaces raw connection access with registered protocol methods. The companion has no SDK client or transport. Deterministic tests exercise real adapter routing, core-method rejection, activation and cancellation, terminal results/errors, disconnects, lifecycle batching, and adapter-first shutdown. Integration tests use the published Figma listen 1.3.1 server with both 2025 and 2026 handshakes.
+
+A fresh real Pi 1.0.3 / ChatGPT run using the new adapter implementation produced exactly three turns: the initial subscribe turn, a comment-triggered turn, and a disconnect-triggered turn. The model echoed the unique synthetic comment and subsequently replied `STREAM_STOPPED` after the fixture server exited. No additional prompt was sent. Shutdown produced no additional turn. The comment reply arrived about 3.8 seconds after fixture update; this is controlled-fixture evidence, not a Figma polling latency claim.
+
+The live Figma edit test above predates this refactor; it was not repeated against real Figma for this change.

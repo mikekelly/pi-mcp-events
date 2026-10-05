@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { EventConnection } from "../dist/stream.js";
+import { adapter } from "./protocol-fixture.mjs";
+import { EVENTS_PROTOCOL } from "../dist/protocol.js";
 import { EventBatcher } from "../dist/batch.js";
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn) {
@@ -33,19 +35,23 @@ for (const modern of [false, true])
     await client.connect(transport);
     assert.equal(client.getProtocolEra(), modern ? "modern" : "legacy");
     const controller = new AbortController();
-    let released = 0;
+    const mediated = adapter.createProtocolSession(
+      {
+        status: "connected",
+        definition: { command: "node" },
+        client,
+        transport,
+        inFlight: 0,
+        lastUsedAt: 0,
+      },
+      controller.signal,
+      EVENTS_PROTOCOL,
+    );
     const events = [];
     const statuses = [];
     const conn = new EventConnection(
       "figma",
-      {
-        client,
-        transport,
-        signal: controller.signal,
-        release() {
-          released++;
-        },
-      },
+      mediated,
       (sub, e) => events.push({ sub, e }),
       (s) => statuses.push({ ...s }),
     );
@@ -93,7 +99,7 @@ for (const modern of [false, true])
     );
     assert.equal(statuses.at(-1).status, "stopped");
     conn.close();
-    assert.equal(released, 1);
+    assert.equal(mediated.signal.aborted, true);
     assert.equal(
       (await client.listTools()).tools.length,
       5,
