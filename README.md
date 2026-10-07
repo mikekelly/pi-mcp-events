@@ -8,24 +8,27 @@ For the Figma workflow, the **official remote Figma MCP** reads and edits design
 
 ## Install
 
-**Pi MCP Events 0.2.0 requires adapter fork 5.1.0 or newer. Upgrade both packages together from the older 0.1.0 / 5.0.1 pair.**
-
-Requires Node 22.19+ and Pi 1.0.3+. For now, use [Mike Kelly's adapter fork](https://github.com/mikekelly/pi-mcp-adapter), which includes the mediated protocol-extension hook needed by this package. Unmodified upstream pi-mcp-adapter 5.0.0 does not expose that hook.
+Requires Node 22.19+, Pi 1.0.3+, and [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) 5.1.0 or newer, which provides the mediated protocol-extension hook this package uses.
 
 ```sh
-# Skip removal if the upstream adapter is not installed.
-pi remove npm:pi-mcp-adapter
-pi install npm:@realmikekelly/pi-mcp-adapter@^5.1.0
+pi install npm:pi-mcp-adapter@^5.1.0
 pi install npm:@realmikekelly/pi-mcp-events@^0.2.0
 ```
 
 Use the full `npm:@realmikekelly/pi-mcp-events` source: `npm:` tells Pi to install from npm, and `@realmikekelly/` is part of the published package name. A bare `pi install pi-mcp-events` is treated as a local path.
 
-Restart Pi. Keep only one adapter enabled; if you installed the upstream adapter from Git or a local path, remove that registration instead. **Your existing MCP server configuration stays the same.** Once upstream includes the hook, you can switch back to the official adapter and keep this companion.
+Restart Pi. **Your existing MCP server configuration stays the same.** Keep only one adapter enabled.
+
+**Upgrading from 0.1.0:** Pi MCP Events 0.2.0 needs adapter 5.1.0+; the 0.1.0 connection-lease API is no longer supported. If you installed the interim `@realmikekelly/pi-mcp-adapter` fork, switch back to the official adapter. Its configuration and saved credentials carry over:
+
+```sh
+pi remove npm:@realmikekelly/pi-mcp-adapter
+pi install npm:pi-mcp-adapter@^5.1.0
+```
 
 Both packages must be installed as Pi extensions. The companion deliberately does not install another adapter as an npm dependency. It reuses the active adapter's connection, so a server can offer tools and events in the same process. The adapter's management UI and tool rendering remain available; this version does not add a dedicated subscriptions panel.
 
-If the adapter is missing, disabled, or lacks the required hook, the first `mcp_events` catalog or subscribe request returns an error with the replacement install command and restart instructions. Pi also shows those instructions as a warning once per session. Compatibility is checked when you use the tool, not at startup. Pi stays running, and the extension does not install packages or launch a separate MCP server to work around the missing hook.
+If the adapter is missing, disabled, or lacks the required hook, the first `mcp_events` catalog or subscribe request returns an error with the adapter install command and restart instructions. Pi also shows those instructions as a warning once per session. Compatibility is checked when you use the tool, not at startup. Pi stays running, and the extension does not install packages or launch a separate MCP server to work around the missing hook.
 
 ## Set up Figma collaboration
 
